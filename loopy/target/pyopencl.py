@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     from loopy.codegen.result import CodeGenerationResult
     from loopy.kernel import LoopKernel
     from loopy.target.pyopencl_execution import PyOpenCLExecutor
-    from loopy.translation_unit import FunctionIdT, TranslationUnit
+    from loopy.translation_unit import CallableId, TranslationUnit
     from loopy.typing import Expression
 
 
@@ -625,7 +625,7 @@ class PyOpenCLTarget(OpenCLTarget):
     # and mypy doesn't like it.
     def get_kernel_executor(self, t_unit: TranslationUnit,  # type: ignore[override]
                             queue_or_context: cl.CommandQueue | cl.Context,
-                            *args: Any, entrypoint: FunctionIdT, **kwargs: Any
+                            *args: Any, entrypoint: CallableId, **kwargs: Any
                             ) -> PyOpenCLExecutor:
         from pyopencl import CommandQueue
         if isinstance(queue_or_context, CommandQueue):

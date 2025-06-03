@@ -25,15 +25,23 @@ THE SOFTWARE.
 """
 
 
+from typing import TYPE_CHECKING, Callable, TypeVar
 from warnings import warn
 
 import islpy as isl
 from islpy import dim_type
 
 from loopy.diagnostic import LoopyError, StaticValueFindingError
+from loopy.typing import not_none
 
 
-def pw_aff_to_aff(pw_aff):
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from pymbolic import Expression
+
+
+def pw_aff_to_aff(pw_aff: isl.Aff | isl.PwAff) -> isl.Aff:
     if isinstance(pw_aff, isl.Aff):
         return pw_aff
 
@@ -220,9 +228,16 @@ def simplify_pw_aff(pw_aff, context=None):
 
 # {{{ static_*_of_pw_aff
 
-def static_extremum_of_pw_aff(pw_aff, constants_only, set_method, what, context):
+def static_extremum_of_pw_aff(
+            pw_aff: isl.PwAff,
+            constants_only: bool,
+            set_method: Callable[[isl.PwAff, isl.PwAff], isl.Set],
+            what: str,
+            context: isl.Set | isl.BasicSet | None,
+        ) -> isl.Aff:
     if context is not None:
-        context = isl.align_spaces(context, pw_aff.get_domain_space(),
+        context = isl.align_spaces(
+               context, pw_aff.get_domain_space(),
                 obj_bigger_ok=True).params()
         pw_aff = pw_aff.gist(context)
 
@@ -237,7 +252,7 @@ def static_extremum_of_pw_aff(pw_aff, constants_only, set_method, what, context)
     from pytools import flatten, memoize
 
     @memoize
-    def is_bounded(set):
+    def is_bounded(set: isl.Set):
         assert set.dim(dim_type.set) == 0
         return (set
                 .move_dims(dim_type.set, 0,
@@ -282,17 +297,29 @@ def static_extremum_of_pw_aff(pw_aff, constants_only, set_method, what, context)
             % (what, pw_aff))
 
 
-def static_min_of_pw_aff(pw_aff, constants_only, context=None):
+def static_min_of_pw_aff(
+            pw_aff: isl.PwAff,
+            constants_only: bool,
+            context: isl.Set | isl.BasicSet | None = None,
+        ) -> isl.Aff:
     return static_extremum_of_pw_aff(pw_aff, constants_only, isl.PwAff.ge_set,
             "minimum", context)
 
 
-def static_max_of_pw_aff(pw_aff, constants_only, context=None):
+def static_max_of_pw_aff(
+            pw_aff: isl.PwAff,
+            constants_only: bool,
+            context: isl.Set | isl.BasicSet | None = None,
+        ) -> isl.Aff:
     return static_extremum_of_pw_aff(pw_aff, constants_only, isl.PwAff.le_set,
             "maximum", context)
 
 
-def static_value_of_pw_aff(pw_aff, constants_only, context=None):
+def static_value_of_pw_aff(
+            pw_aff: isl.PwAff,
+            constants_only: bool,
+            context: isl.Set | isl.BasicSet | None = None,
+        ) -> isl.Aff:
     return static_extremum_of_pw_aff(pw_aff, constants_only, isl.PwAff.eq_set,
             "value", context)
 
@@ -595,7 +622,15 @@ def find_max_of_pwaff_with_params(pw_aff, n_allowed_params):
 
 # {{{ subst_into_pw(qpolynomial|aff)
 
-def set_dim_name(obj, dt, pos, name):
+HasNamesT = TypeVar("HasNamesT", isl.PwQPolynomial, isl.BasicSet, isl.PwAff)
+
+
+def set_dim_name(
+             obj: HasNamesT,
+             dt: dim_type,
+             pos: int,
+             name: str,
+         ) -> HasNamesT:
     assert isinstance(name, str)
     if isinstance(obj, (isl.PwQPolynomial, isl.BasicSet)):
         return obj.set_dim_name(dt, pos, name)
@@ -607,7 +642,14 @@ def set_dim_name(obj, dt, pos, name):
         raise NotImplementedError(f"not implemented for {type(obj)}.")
 
 
-def get_param_subst_domain(new_space, base_obj, subst_dict):
+PwAffOrPolynomialT = TypeVar("PwAffOrPolynomialT", isl.PwAff,  isl.PwQPolynomial)
+
+
+def get_param_subst_domain(
+            new_space: isl.Space,
+            base_obj: PwAffOrPolynomialT,
+            subst_dict: Mapping[str, Expression],
+        ) -> tuple[PwAffOrPolynomialT, isl.BasicSet, Mapping[str, Expression]]:
     """Modify the :mod:`islpy` object *base_obj* to incorporate parameters for
     the keys of *subst_dict*, and rename existing parameters to include a
     trailing prime.
@@ -631,7 +673,7 @@ def get_param_subst_domain(new_space, base_obj, subst_dict):
 
     new_subst_dict = {}
     for i in range(i_begin_subst_space):
-        old_name = base_obj.space.get_dim_name(dim_type.param, i)
+        old_name = not_none(base_obj.space.get_dim_name(dim_type.param, i))
         new_name = old_name + "'"
         new_subst_dict[new_name] = subst_dict[old_name]
         base_obj = set_dim_name(base_obj, dim_type.param, i, new_name)
@@ -646,7 +688,7 @@ def get_param_subst_domain(new_space, base_obj, subst_dict):
     base_obj = base_obj.add_dims(dim_type.param, new_space.dim(dim_type.param))
     for i in range(new_space.dim(dim_type.param)):
         base_obj = set_dim_name(base_obj, dim_type.param, i+i_begin_subst_space,
-                new_space.get_dim_name(dim_type.param, i))
+                not_none(new_space.get_dim_name(dim_type.param, i)))
 
     # }}}
 
@@ -667,7 +709,11 @@ def get_param_subst_domain(new_space, base_obj, subst_dict):
     return base_obj, subst_domain, subst_dict
 
 
-def subst_into_pwqpolynomial(new_space, poly, subst_dict):
+def subst_into_pwqpolynomial(
+             new_space: isl.Space,
+             poly: isl.PwQPolynomial,
+             subst_dict: Mapping[str, Expression]
+         ):
     """
     Returns an instance of :class:`islpy.PwQPolynomial` with substitutions from
     *subst_dict* substituted into *poly*.
@@ -717,7 +763,11 @@ def subst_into_pwqpolynomial(new_space, poly, subst_dict):
     return result
 
 
-def subst_into_pwaff(new_space, pwaff, subst_dict):
+def subst_into_pwaff(
+             new_space: isl.Space,
+             pwaff: isl.PwAff,
+             subst_dict: Mapping[str, Expression]
+         ):
     """
     Returns an instance of :class:`islpy.PwAff` with substitutions from
     *subst_dict* substituted into *pwaff*.

@@ -9,8 +9,6 @@
 """
 from __future__ import annotations
 
-from loopy.typing import not_none
-
 
 __copyright__ = "Copyright (C) 2012 Andreas Kloeckner"
 
@@ -45,6 +43,7 @@ from typing import (
     Callable,
     ClassVar,
     Iterator,
+    Literal,
     Mapping,
     Sequence,
 )
@@ -52,6 +51,7 @@ from warnings import warn
 
 import numpy as np
 from constantdict import constantdict
+from typing_extensions import overload
 
 import islpy  # to help out Sphinx
 import islpy as isl
@@ -78,16 +78,21 @@ from loopy.kernel.data import (
 )
 from loopy.tools import update_persistent_hash
 from loopy.types import LoopyType, NumpyType
+from loopy.typing import not_none
 
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Set
+
     from pymbolic import ArithmeticExpression
 
     from loopy.kernel.function_interface import InKernelCallable
     from loopy.kernel.instruction import InstructionBase
+    from loopy.kernel.tools import SetOperationCacheManager
     from loopy.options import Options
     from loopy.schedule import ScheduleItem
-    from loopy.target import TargetBase
+    from loopy.target import ASTBuilderBase, ASTType, TargetBase
+    from loopy.translation_unit import CallablesTable
     from loopy.typing import Expression, InameStr
 
 
@@ -176,16 +181,16 @@ class LoopKernel(Taggable):
     state: KernelState = KernelState.INITIAL
     name: str = "loopy_kernel"
 
-    preambles: Sequence[tuple[int, str]] = ()
+    preambles: Sequence[tuple[str, str]] = ()
     preamble_generators: Sequence[
         Callable[
                 [loopy.codegen.PreambleInfo],
-                Iterator[tuple[int, str]]]
+                Iterator[tuple[str, str]]]
             ] = ()
     symbol_manglers: Sequence[
             Callable[[LoopKernel, str], tuple[LoopyType, str] | None]] = ()
     linearization: Sequence[ScheduleItem] | None = None
-    iname_slab_increments: Mapping[InameStr, tuple[int, int]] = field(
+    iname_slab_increments: constantdict[InameStr, tuple[int, int]] = field(
             default_factory=constantdict)
     """
     A mapping from inames to (lower_incr,
@@ -230,10 +235,12 @@ class LoopKernel(Taggable):
 
     # {{{ symbol mangling
 
-    def mangle_symbol(self, ast_builder, identifier):
-        manglers = ast_builder.symbol_manglers() + list(self.symbol_manglers)
-
-        for mangler in manglers:
+    def mangle_symbol(
+                self,
+                ast_builder: ASTBuilderBase[ASTType],
+                identifier: str
+            ) -> tuple[LoopyType, str] | None:
+        for mangler in [*self.symbol_manglers, *ast_builder.symbol_manglers()]:
             result = mangler(self, identifier)
             if result is not None:
                 return result
@@ -454,7 +461,7 @@ class LoopKernel(Taggable):
         # Subdomains may carry other domains' inames as parameters.
         # Move them back into the 'set' part of the space.
         param_names = {
-                result.get_dim_name(dim_type.param, i)
+                not_none(result.get_dim_name(dim_type.param, i))
                 for i in range(result.dim(dim_type.param))}
         for actual_iname in param_names - self.all_params():
             result = result.move_dims(
@@ -466,7 +473,7 @@ class LoopKernel(Taggable):
 
         return result
 
-    def get_inames_domain(self, inames: str | frozenset[str]) -> isl.BasicSet:
+    def get_inames_domain(self, inames: str | Set[str]) -> isl.BasicSet:
         if not inames:
             return self.combine_domains(())
 
@@ -539,7 +546,7 @@ class LoopKernel(Taggable):
 
     # {{{ iname wrangling
 
-    def iname_tags(self, iname):
+    def iname_tags(self, iname: InameStr)  -> frozenset[Tag]:
         return self.inames[iname].tags
 
     def iname_tags_of_type(
@@ -600,7 +607,7 @@ class LoopKernel(Taggable):
             result.update(inames)
         return result
 
-    def insn_inames(self, insn):
+    def insn_inames(self, insn: str | InstructionBase) -> frozenset[InameStr]:
         if isinstance(insn, str):
             insn = self.id_to_insn[insn]
         return insn.within_inames
@@ -718,8 +725,8 @@ class LoopKernel(Taggable):
         return result
 
     @memoize_method
-    def get_read_variables(self):
-        result = set()
+    def get_read_variables(self) -> Set[str]:
+        result: set[str] = set()
         for insn in self.instructions:
             result.update(insn.read_dependency_names())
 
@@ -728,7 +735,7 @@ class LoopKernel(Taggable):
 
         return result
 
-    def get_written_variables(self):
+    def get_written_variables(self) -> Set[str]:
         try:
             return self._cached_written_variables
         except AttributeError:
@@ -798,7 +805,7 @@ class LoopKernel(Taggable):
     # {{{ bounds finding
 
     @property
-    def cache_manager(self):
+    def cache_manager(self) -> SetOperationCacheManager:
         try:
             return self._cache_manager
         except AttributeError:
@@ -810,7 +817,10 @@ class LoopKernel(Taggable):
         return cm
 
     @memoize_method
-    def get_iname_bounds(self, iname, constants_only=False):
+    def get_iname_bounds(self,
+                 iname: str,
+                 constants_only: bool = False
+             ) -> _BoundsRecord:
         domain = self.get_inames_domain(frozenset([iname]))
 
         assumptions = self.assumptions.project_out_except(
@@ -853,8 +863,12 @@ class LoopKernel(Taggable):
                 constants_only=True)))
 
     @memoize_method
-    def get_grid_sizes_for_insn_ids_as_dicts(self, insn_ids,
-            callables_table, ignore_auto=False):
+    def get_grid_sizes_for_insn_ids_as_dicts(self,
+                insn_ids: Collection[str],
+                callables_table: CallablesTable,
+                *,
+                ignore_auto: bool = False,
+            ) -> tuple[dict[int, isl.PwAff], dict[int, isl.PwAff]]:
         """
         Returns a tuple of (global_sizes, local_sizes), where global_sizes,
         local_sizes are the grid sizes accommodating all of *insn_ids*. The grid
@@ -949,8 +963,17 @@ class LoopKernel(Taggable):
         return global_sizes, local_sizes
 
     @memoize_method
-    def get_grid_sizes_for_insn_ids(self, insn_ids, callables_table,
-            ignore_auto=False, return_dict=False):
+    def get_grid_sizes_for_insn_ids(self,
+                insn_ids: Collection[str],
+                callables_table: CallablesTable,
+                *,
+                ignore_auto: bool = False,
+                return_dict: bool = False
+            ) -> (
+            tuple[dict[int, isl.PwAff],
+                dict[int, isl.PwAff]]
+            | tuple[tuple[isl.PwAff, ...],
+                    tuple[isl.PwAff, ...]]):
         """Return a tuple (global_size, local_size) containing a grid that
         could accommodate execution of all instructions whose IDs are given
         in *insn_ids*.
@@ -999,9 +1022,38 @@ class LoopKernel(Taggable):
         return (to_dim_tuple(global_sizes, "global"),
                 to_dim_tuple(local_sizes, "local"))
 
+    @overload
+    def get_grid_sizes_for_insn_ids_as_exprs(self,
+                        insn_ids: Collection[str],
+                        callables_table: CallablesTable,
+                        *,
+                        ignore_auto: bool = ...,
+                        return_dict: Literal[False] = ...
+                    ) -> tuple[tuple[Expression, ...], tuple[Expression, ...]]:
+        ...
+
+    @overload
+    def get_grid_sizes_for_insn_ids_as_exprs(self,
+                        insn_ids: Collection[str],
+                        callables_table: CallablesTable,
+                        *,
+                        ignore_auto: bool = ...,
+                        return_dict: Literal[True]
+                    ) -> tuple[dict[int, Expression], dict[int, Expression]]:
+        ...
+
     @memoize_method
-    def get_grid_sizes_for_insn_ids_as_exprs(self, insn_ids,
-            callables_table, ignore_auto=False, return_dict=False):
+    def get_grid_sizes_for_insn_ids_as_exprs(self,
+                insn_ids: Collection[str],
+                callables_table: CallablesTable,
+                *,
+                ignore_auto: bool = False,
+                return_dict: bool = False
+            ) -> (
+            tuple[dict[int, ArithmeticExpression],
+                dict[int, ArithmeticExpression]]
+            | tuple[tuple[ArithmeticExpression, ...],
+                    tuple[ArithmeticExpression, ...]]):
         """Return a tuple (global_size, local_size) containing a grid that
         could accommodate execution of all instructions whose IDs are given
         in *insn_ids*.
@@ -1012,7 +1064,8 @@ class LoopKernel(Taggable):
         """
 
         grid_size, group_size = self.get_grid_sizes_for_insn_ids(
-                insn_ids, callables_table, ignore_auto, return_dict)
+                insn_ids, callables_table,
+                ignore_auto=ignore_auto, return_dict=return_dict)
 
         if return_dict:
             def dict_to_exprs(d):
@@ -1028,31 +1081,63 @@ class LoopKernel(Taggable):
 
         return tup_to_exprs(grid_size), tup_to_exprs(group_size)
 
-    def get_grid_size_upper_bounds(self, callables_table, ignore_auto=False,
-            return_dict=False):
+    def get_grid_size_upper_bounds(self,
+                callables_table: CallablesTable,
+                ignore_auto: bool = False,
+                return_dict: bool = False
+            ) -> (
+            tuple[dict[int, isl.PwAff],
+                dict[int, isl.PwAff]]
+            | tuple[tuple[isl.PwAff, ...],
+                    tuple[isl.PwAff, ...]]):
         """Return a tuple (global_size, local_size) containing a grid that
         could accommodate execution of *all* instructions in the kernel.
 
         *global_size* and *local_size* are :class:`islpy.PwAff` objects.
         """
         return self.get_grid_sizes_for_insn_ids(
-                frozenset(insn.id for insn in self.instructions),
+                frozenset(not_none(insn.id) for insn in self.instructions),
                 callables_table, ignore_auto=ignore_auto,
                 return_dict=return_dict)
 
+    @overload
+    def get_grid_size_upper_bounds_as_exprs(self,
+                        callables_table: CallablesTable,
+                        *,
+                        ignore_auto: bool = ...,
+                        return_dict: Literal[False] = ...
+                    ) -> tuple[
+                            tuple[ArithmeticExpression, ...],
+                            tuple[ArithmeticExpression, ...]]:
+        ...
+
+    @overload
+    def get_grid_size_upper_bounds_as_exprs(self,
+                        callables_table: CallablesTable,
+                        *,
+                        ignore_auto: bool = ...,
+                        return_dict: Literal[True]
+                    ) -> tuple[
+                            dict[int, ArithmeticExpression],
+                            dict[int, ArithmeticExpression]]:
+        ...
+
     def get_grid_size_upper_bounds_as_exprs(
-            self, callables_table,
-            ignore_auto=False, return_dict=False
-            ) -> tuple[
-                    tuple[ArithmeticExpression, ...],
-                    tuple[ArithmeticExpression, ...]]:
+                self, callables_table: CallablesTable,
+                ignore_auto: bool = False,
+                return_dict: bool = False
+            ) -> (
+            tuple[dict[int, ArithmeticExpression],
+                dict[int, ArithmeticExpression]]
+            | tuple[tuple[ArithmeticExpression, ...],
+                    tuple[ArithmeticExpression, ...]]):
         """Return a tuple (global_size, local_size) containing a grid that
         could accommodate execution of *all* instructions in the kernel.
 
         *global_size* and *local_size* are :mod:`pymbolic` expressions
         """
         return self.get_grid_sizes_for_insn_ids_as_exprs(
-                frozenset(insn.id for insn in self.instructions),
+                frozenset(not_none(insn.id) for insn in self.instructions),
                 callables_table, ignore_auto=ignore_auto,
                 return_dict=return_dict)
 

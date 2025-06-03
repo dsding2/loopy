@@ -28,7 +28,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "pytools>=2024.1.5",
+    "pytools>=2025.1.6",
     "pymbolic>=2024.2.2",
     "genpy>=2016.1.2",
 
@@ -36,7 +36,7 @@ dependencies = [
     "numpy>=1.19",
 
     "cgen>=2016.1",
-    "islpy>=2019.1",
+    "islpy>=2025.2",
     "codepy>=2017.1",
     "colorama",
     "Mako",
@@ -57,7 +57,6 @@ fortran = [
 dev = [
     # https://github.com/astral-sh/ruff/issues/16943
     "ruff!=0.11.1,!=0.11.2",
-    "mypy",
     "types-colorama",
     "types-Pygments",
 ]
@@ -221,6 +220,9 @@ reportPrivateUsage = "none"
 # - numpy scalar types are reported as incomplete (because of "any" precision)
 reportUnknownVariableType = "none"
 
+reportUnreachable = "hint"
+reportUnnecessaryComparison = "hint"
+
 # This reports even cycles that are qualified by 'if TYPE_CHECKING'. Not what
 # we care about at this moment.
 # https://github.com/microsoft/pyright/issues/746
@@ -234,6 +236,7 @@ exclude = [
     "contrib/mem-pattern-explorer/*.py",
     "loopy/ipython_ext.py",
     "loopy/frontend/fortran/*.py",
+    "doc"
 ]
 
 [[tool.basedpyright.executionEnvironments]]
@@ -243,4 +246,5 @@ reportUnknownVariableType = "none"
 reportMissingParameterType = "none"
 reportAttributeAccessIssue = "none"
 reportMissingImports = "none"
+reportArgumentType = "hint"
 

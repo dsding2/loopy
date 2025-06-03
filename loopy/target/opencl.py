@@ -24,10 +24,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 """
 
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 from constantdict import constantdict
+from typing_extensions import Self, override
 
 from pymbolic import var
 from pytools import memoize_method
@@ -38,14 +39,17 @@ from loopy.kernel.data import AddressSpace, ConstantArg, ImageArg
 from loopy.kernel.function_interface import ScalarCallable
 from loopy.target.c import CFamilyASTBuilder, CFamilyTarget, DTypeRegistryWrapper
 from loopy.target.c.codegen.expression import ExpressionToCExpressionMapper
-from loopy.types import NumpyType
+from loopy.types import LoopyType, NumpyType
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from cgen import Declarator, Generable
 
     from loopy.codegen import CodeGenerationState
     from loopy.codegen.result import CodeGenerationResult
+    from loopy.translation_unit import CallablesInferenceContext
 
 
 # {{{ dtype registry wrappers
@@ -198,21 +202,31 @@ class OpenCLCallable(ScalarCallable):
     :class:`loopy.target.c.CMathCallable`.
     """
 
-    def with_types(self, arg_id_to_dtype, callables_table):
+    @override
+    def with_types(self,
+                   arg_id_to_dtype: Mapping[int | str, LoopyType],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
         name = self.name
+
+        for id in arg_id_to_dtype:
+            if not isinstance(id, int):
+                raise LoopyError(f"'{name}' can take only positional arguments")
+
+        arg_num_to_dtype = {cast("int", id): t for id, t in arg_id_to_dtype.items()}
 
         # {{{ unary functions
         if name == "abs":
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 0:
                     raise LoopyError(f"'{name}' can take only one argument.")
 
-            if 0 not in arg_id_to_dtype or arg_id_to_dtype[0] is None:
+            if 0 not in arg_num_to_dtype:
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
-            dtype = arg_id_to_dtype[0].numpy_dtype
+            dtype = arg_num_to_dtype[0].numpy_dtype
 
             if dtype.kind in ("u", "i"):
                 # OpenCL C 2.2, Section 6.13.3: abs returns *u*gentype
@@ -222,7 +236,7 @@ class OpenCLCallable(ScalarCallable):
                                 0: NumpyType(dtype),
                                 -1: NumpyType(to_unsigned_dtype(dtype))
                                 })),
-                        callables_table)
+                        clbl_inf_ctx)
             elif dtype.kind == "f":
                 name = "fabs"
             else:
@@ -233,16 +247,16 @@ class OpenCLCallable(ScalarCallable):
                     "tan", "tanh", "exp", "log", "log10", "sqrt", "ceil", "floor",
                     "erf", "erfc"]:
 
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 0:
                     raise LoopyError(f"'{name}' can take only one argument.")
 
-            if 0 not in arg_id_to_dtype or arg_id_to_dtype[0] is None:
+            if 0 not in arg_num_to_dtype or arg_num_to_dtype[0] is None:
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
-            dtype = arg_id_to_dtype[0]
+            dtype = arg_num_to_dtype[0]
             dtype = dtype.numpy_dtype
 
             if dtype.kind in ("u", "i"):
@@ -257,28 +271,27 @@ class OpenCLCallable(ScalarCallable):
                             0: NumpyType(dtype),
                             -1: NumpyType(dtype)
                             })),
-                    callables_table)
+                    clbl_inf_ctx)
 
         # }}}
 
         # binary functions
         elif name in ["fmax", "fmin", "atan2", "copysign"]:
 
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 1:
                     # FIXME: Do we need to raise here?:
                     #   The pattern we generally follow is that if we don't find
                     #   a function, then we just return None
                     raise LoopyError("%s can take only two arguments." % name)
 
-            if 0 not in arg_id_to_dtype or 1 not in arg_id_to_dtype or (
-                    arg_id_to_dtype[0] is None or arg_id_to_dtype[1] is None):
+            if 0 not in arg_num_to_dtype or 1 not in arg_num_to_dtype:
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
             dtype = np.result_type(*[
-                    dtype.numpy_dtype for id, dtype in arg_id_to_dtype.items()
+                    dtype.numpy_dtype for id, dtype in arg_num_to_dtype.items()
                     if id >= 0])
 
             if dtype.kind == "c":
@@ -290,18 +303,18 @@ class OpenCLCallable(ScalarCallable):
                         arg_id_to_dtype=constantdict({
                             -1: dtype, 0: dtype, 1: dtype
                             })),
-                    callables_table)
+                    clbl_inf_ctx)
 
         elif name in ["max", "min"]:
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 1:
                     raise LoopyError("%s can take only 2 arguments." % name)
-            if 0 not in arg_id_to_dtype or 1 not in arg_id_to_dtype:
+            if 0 not in arg_num_to_dtype or 1 not in arg_num_to_dtype:
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
             common_dtype = np.result_type(*[
-                    dtype.numpy_dtype for id, dtype in arg_id_to_dtype.items()
+                    dtype.numpy_dtype for id, dtype in arg_num_to_dtype.items()
                     if (id >= 0 and dtype is not None)])
 
             if common_dtype.kind in ["u", "i", "f"]:
@@ -314,40 +327,41 @@ class OpenCLCallable(ScalarCallable):
                             arg_id_to_dtype=constantdict({
                                 -1: dtype, 0: dtype, 1: dtype
                                 })),
-                        callables_table)
+                        clbl_inf_ctx)
             else:
                 # Unsupported type.
                 raise LoopyError("%s function not supported for the types %s" %
                         (name, common_dtype))
 
         elif name == "dot":
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 1:
                     raise LoopyError(f"'{name}' can take only 2 arguments.")
 
-            if 0 not in arg_id_to_dtype or 1 not in arg_id_to_dtype or (
-                    arg_id_to_dtype[0] is None or arg_id_to_dtype[1] is None):
+            if 0 not in arg_num_to_dtype or 1 not in arg_num_to_dtype:
                 # the types provided aren't mature enough to specialize the
                 # callable
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
-            dtype = arg_id_to_dtype[0]
-            scalar_dtype, _offset, _field_name = dtype.numpy_dtype.fields["s0"]
+            dtype = arg_num_to_dtype[0]
+            assert dtype.numpy_dtype.fields is not None
+            # type ignore because I think numpy's type info is mistaken
+            scalar_dtype, _offset, _field_name = dtype.numpy_dtype.fields["s0"]  # pyright: ignore[reportAssignmentType]
             return (
                     self.copy(name_in_target=name, arg_id_to_dtype=constantdict({
                         -1: NumpyType(scalar_dtype), 0: dtype, 1: dtype
                         })),
-                    callables_table)
+                    clbl_inf_ctx)
 
         elif name == "pow":
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 1:
                     raise LoopyError(f"'{name}' can take only 2 arguments.")
 
             common_dtype = np.result_type(*[
-                    dtype.numpy_dtype for id, dtype in arg_id_to_dtype.items()
+                    dtype.numpy_dtype for id, dtype in arg_num_to_dtype.items()
                     if (id >= 0 and dtype is not None)])
 
             if common_dtype == np.float64:
@@ -366,25 +380,25 @@ class OpenCLCallable(ScalarCallable):
                                   0: common_dtype,
                                   1: common_dtype
                                   })),
-                    callables_table)
+                    clbl_inf_ctx)
 
         elif name in _CL_SIMPLE_MULTI_ARG_FUNCTIONS:
             num_args = _CL_SIMPLE_MULTI_ARG_FUNCTIONS[name]
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id < num_args:
                     raise LoopyError("%s can take only %d arguments." % (name,
                             num_args))
 
             for i in range(num_args):
-                if i not in arg_id_to_dtype or arg_id_to_dtype[i] is None:
+                if i not in arg_num_to_dtype:
                     # the types provided aren't mature enough to specialize the
                     # callable
                     return (
-                            self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                            callables_table)
+                            self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                            clbl_inf_ctx)
 
             dtype = np.result_type(*[
-                    dtype.numpy_dtype for id, dtype in arg_id_to_dtype.items()
+                    dtype.numpy_dtype for id, dtype in arg_num_to_dtype.items()
                     if id >= 0])
 
             if dtype.kind == "c":
@@ -398,23 +412,23 @@ class OpenCLCallable(ScalarCallable):
             return (
                     self.copy(name_in_target=name,
                         arg_id_to_dtype=updated_arg_id_to_dtype),
-                    callables_table)
+                    clbl_inf_ctx)
 
         elif name in VECTOR_LITERAL_FUNCS:
             base_tp_name, dtype, count = VECTOR_LITERAL_FUNCS[name]
 
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id < count:
                     raise LoopyError("%s can take only %d arguments." % (name,
                             num_args))
 
             for i in range(count):
-                if i not in arg_id_to_dtype or arg_id_to_dtype[i] is None:
+                if i not in arg_num_to_dtype or arg_num_to_dtype[i] is None:
                     # the types provided aren't mature enough to specialize the
                     # callable
                     return (
-                            self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                            callables_table)
+                            self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                            clbl_inf_ctx)
 
             updated_arg_id_to_dtype = {id: NumpyType(dtype) for id in range(count)}
             updated_arg_id_to_dtype[-1] = OpenCLTarget().vector_dtype(
@@ -424,13 +438,13 @@ class OpenCLCallable(ScalarCallable):
                     self.copy(
                         name_in_target="(%s%d) " % (base_tp_name, count),
                         arg_id_to_dtype=constantdict(updated_arg_id_to_dtype)),
-                    callables_table)
+                    clbl_inf_ctx)
 
         # does not satisfy any of the conditions needed for specialization.
         # hence just returning a copy of the callable.
         return (
-                self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                callables_table)
+                self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                clbl_inf_ctx)
 
 
 def get_opencl_callables():

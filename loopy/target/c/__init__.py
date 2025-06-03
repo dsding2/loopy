@@ -1,8 +1,6 @@
 """Plain C target and base for other C-family languages."""
 from __future__ import annotations
 
-from typing_extensions import override
-
 
 __copyright__ = "Copyright (C) 2015 Andreas Kloeckner"
 
@@ -32,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 
 import numpy as np
 from constantdict import constantdict
+from typing_extensions import Self, override
 
 import pymbolic.primitives as p
 from cgen import (
@@ -68,14 +67,18 @@ from loopy.typing import auto
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from loopy.codegen import CodeGenerationState
     from loopy.codegen.result import CodeGenerationResult
     from loopy.kernel import LoopKernel
     from loopy.schedule import CallKernel
     from loopy.target.execution import ExecutorBase
-    from loopy.translation_unit import FunctionIdT, TranslationUnit
+    from loopy.translation_unit import (
+        CallableId,
+        CallablesInferenceContext,
+        TranslationUnit,
+    )
 
 
 __doc__ = """
@@ -512,14 +515,26 @@ class CMathCallable(ScalarCallable):
     C-Target.
     """
 
-    def with_types(self, arg_id_to_dtype, callables_table):
+    @override
+    def with_types(self,
+                   arg_id_to_dtype: Mapping[int | str, LoopyType],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
+        name = self.name
+
+        for id in arg_id_to_dtype:
+            if not isinstance(id, int):
+                raise LoopyError(f"'{name}' can take only positional arguments")
+
+        arg_num_to_dtype = {cast("int", id): t for id, t in arg_id_to_dtype.items()}
+
         name = self.name
 
         # {{{ (abs|max|min) -> (fabs|fmax|fmin)
 
         if name in ["abs", "min", "max"]:
             dtype = np.result_type(*[
-                    dtype.numpy_dtype for dtype in arg_id_to_dtype.values()])
+                    dtype.numpy_dtype for dtype in arg_num_to_dtype.values()])
             if dtype.kind == "f":
                 name = "f" + name
 
@@ -530,19 +545,21 @@ class CMathCallable(ScalarCallable):
                     "tan", "tanh", "exp", "log", "log10", "sqrt", "ceil", "floor",
                     "erf", "erfc", "abs", "real", "imag", "conj"]:
 
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 0:
                     raise LoopyError(f"'{name}' can take only one argument.")
 
-            if 0 not in arg_id_to_dtype or arg_id_to_dtype[0] is None:
+            if 0 not in arg_num_to_dtype:
                 # the types provided aren't mature enough to specialize the
                 # callable
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
-            dtype = arg_id_to_dtype[0].numpy_dtype
-            real_dtype = np.empty(0, dtype=dtype).real.dtype
+            dtype = arg_num_to_dtype[0].numpy_dtype
+
+            # type ignore because I think .real exists on all numpy arrays
+            real_dtype = np.empty(0, dtype=dtype).real.dtype  # pyright: ignore[reportAttributeAccessIssue]
 
             if dtype.kind in ("u", "i"):
                 # ints and unsigned casted to float32
@@ -574,25 +591,24 @@ class CMathCallable(ScalarCallable):
                         arg_id_to_dtype=constantdict({
                             0: NumpyType(dtype),
                             -1: NumpyType(result_dtype)})),
-                    callables_table)
+                    clbl_inf_ctx)
 
         # binary functions
         elif name in ["fmax", "fmin", "pow", "atan2", "copysign"]:
 
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 1:
                     raise LoopyError("%s can take only two arguments." % name)
 
-            if 0 not in arg_id_to_dtype or 1 not in arg_id_to_dtype or (
-                    arg_id_to_dtype[0] is None or arg_id_to_dtype[1] is None):
+            if 0 not in arg_num_to_dtype or 1 not in arg_num_to_dtype:
                 # the types provided aren't mature enough to specialize the
                 # callable
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
             dtype = np.result_type(*[
-                    dtype.numpy_dtype for id, dtype in arg_id_to_dtype.items()
+                    dtype.numpy_dtype for id, dtype in arg_num_to_dtype.items()
                     if id >= 0])
             real_dtype = np.empty(0, dtype=dtype).real.dtype
 
@@ -616,23 +632,22 @@ class CMathCallable(ScalarCallable):
             return (
                     self.copy(name_in_target=name,
                         arg_id_to_dtype=constantdict({-1: dtype, 0: dtype, 1: dtype})),
-                    callables_table)
+                    clbl_inf_ctx)
         elif name in ["max", "min"]:
 
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 1:
                     raise LoopyError("%s can take only two arguments." % name)
 
-            if 0 not in arg_id_to_dtype or 1 not in arg_id_to_dtype or (
-                    arg_id_to_dtype[0] is None or arg_id_to_dtype[1] is None):
+            if 0 not in arg_num_to_dtype or 1 not in arg_num_to_dtype:
                 # the types provided aren't resolved enough to specialize the
                 # callable
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
             dtype = np.result_type(*[
-                    dtype.numpy_dtype for id, dtype in arg_id_to_dtype.items()
+                    dtype.numpy_dtype for id, dtype in arg_num_to_dtype.items()
                     if id >= 0])
             if dtype.kind not in "iu":
                 # only support integers for now to avoid having to deal with NaNs
@@ -644,20 +659,20 @@ class CMathCallable(ScalarCallable):
                                   -1: NumpyType(dtype),
                                   0: NumpyType(dtype),
                                   1: NumpyType(dtype)})),
-                    callables_table)
+                    clbl_inf_ctx)
         elif name == "isnan":
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 0:
                     raise LoopyError(f"'{name}' can take only one argument.")
 
-            if 0 not in arg_id_to_dtype or arg_id_to_dtype[0] is None:
+            if 0 not in arg_num_to_dtype or arg_num_to_dtype[0] is None:
                 # the types provided aren't mature enough to specialize the
                 # callable
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
-            dtype = arg_id_to_dtype[0].numpy_dtype
+            dtype = arg_num_to_dtype[0].numpy_dtype
 
             if dtype.kind == "f":
                 pass
@@ -674,7 +689,13 @@ class CMathCallable(ScalarCallable):
                         arg_id_to_dtype=constantdict({
                             0: NumpyType(dtype),
                             -1: NumpyType(np.int32)})),
-                    callables_table)
+                    clbl_inf_ctx)
+
+        # does not satisfy any of the conditions needed for specialization.
+        # hence just returning a copy of the callable.
+        return (
+                self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                clbl_inf_ctx)
 
     def generate_preambles(self, target):
         if self.name_in_target.startswith("lpy_max"):
@@ -708,27 +729,37 @@ class CMathCallable(ScalarCallable):
 
 
 class GNULibcCallable(ScalarCallable):
-    def with_types(self, arg_id_to_dtype, callables_table):
+    @override
+    def with_types(self,
+                   arg_id_to_dtype: Mapping[int | str, LoopyType],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
         name = self.name
+
+        for id in arg_id_to_dtype:
+            if not isinstance(id, int):
+                raise LoopyError(f"'{name}' can take only positional arguments")
+
+        arg_num_to_dtype = {cast("int", id): t for id, t in arg_id_to_dtype.items()}
 
         if name in ["bessel_jn", "bessel_yn"]:
             # bessel functions
             # https://www.gnu.org/software/libc/manual/html_node/Special-Functions.html
-            for id in arg_id_to_dtype:
+            for id in arg_num_to_dtype:
                 if not -1 <= id <= 1:
                     raise LoopyError(f"'{name}' can take exactly 2 arguments.")
 
-            if (not arg_id_to_dtype.get(0)) or (not arg_id_to_dtype.get(1)):
+            if (not arg_num_to_dtype.get(0)) or (not arg_num_to_dtype.get(1)):
                 # the types provided aren't mature enough to specialize the
                 # callable
                 return (
-                        self.copy(arg_id_to_dtype=constantdict(arg_id_to_dtype)),
-                        callables_table)
+                        self.copy(arg_id_to_dtype=constantdict(arg_num_to_dtype)),
+                        clbl_inf_ctx)
 
-            if not arg_id_to_dtype[0].is_integral():
+            if not arg_num_to_dtype[0].is_integral():
                 raise LoopyTypeError(f"'{name}' needs order to be an int-type.")
 
-            if arg_id_to_dtype[1].numpy_dtype == np.float32:
+            if arg_num_to_dtype[1].numpy_dtype == np.float32:
                 # See e.g.
                 # https://opensource.apple.com/source/Libm/Libm-2026/Source/Intel/math.h.auto.html
                 # and
@@ -739,19 +770,19 @@ class GNULibcCallable(ScalarCallable):
                     name_in_target = name[-2:]+"f"
                 else:
                     name_in_target = name[-2:]
-            elif arg_id_to_dtype[1].numpy_dtype == np.float64:
+            elif arg_num_to_dtype[1].numpy_dtype == np.float64:
                 name_in_target = name[-2:]
             else:
                 raise LoopyTypeError("argument to bessel function must be f32,"
-                                     f"f64, got {arg_id_to_dtype[1].numpy_dtype}.")
+                                     f"f64, got {arg_num_to_dtype[1].numpy_dtype}.")
 
             return (
                     self.copy(name_in_target=name_in_target,
                               arg_id_to_dtype=constantdict({
-                                  -1: arg_id_to_dtype[1],
+                                  -1: arg_num_to_dtype[1],
                                   0: NumpyType(np.int32),
-                                  1: arg_id_to_dtype[1]})),
-                    callables_table)
+                                  1: arg_num_to_dtype[1]})),
+                    clbl_inf_ctx)
         else:
             raise NotImplementedError(f"with_types for '{name}'")
 
@@ -1257,7 +1288,7 @@ class CFamilyASTBuilder(ASTBuilderBase[Generable]):
 
         ecm = codegen_state.expression_to_code_mapper
         func_id = insn.expression.function.name
-        in_knl_callable = codegen_state.callables_table[func_id]
+        in_knl_callable = codegen_state.clbl_inf_ctx[func_id]
 
         if isinstance(in_knl_callable, ScalarCallable) and (
                 in_knl_callable.name_in_target == "loopy_make_tuple"):
@@ -1450,7 +1481,7 @@ class ExecutableCTarget(CTarget):
 
     def get_kernel_executor(
             self, t_unit: TranslationUnit,
-            *args: Any, entrypoint: FunctionIdT, **kwargs: Any) -> ExecutorBase:
+            *args: Any, entrypoint: CallableId, **kwargs: Any) -> ExecutorBase:
         from loopy.target.c.c_execution import CExecutor
         return CExecutor(t_unit, entrypoint=entrypoint, compiler=self.compiler)
 

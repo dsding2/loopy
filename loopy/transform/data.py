@@ -44,6 +44,7 @@ from loopy.typing import assert_tuple
 if TYPE_CHECKING:
     from pymbolic import ArithmeticExpression
 
+    from loopy.match import ToMatchConvertible
     from loopy.typing import Expression
 
 
@@ -164,7 +165,7 @@ def add_prefetch_for_single_kernel(kernel, callables_table, var_name,
         fetch_bounding_box=False,
         fetch_outer_inames=None,
         prefetch_insn_id=None,
-        within=None):
+        within: ToMatchConvertible = None):
     """See :func:`add_prefetch` for detailed, user-facing documentation."""
 
     assert isinstance(kernel, LoopKernel)
@@ -300,13 +301,15 @@ def add_prefetch_for_single_kernel(kernel, callables_table, var_name,
         return new_kernel
 
 
-def add_prefetch(t_unit,
+def add_prefetch(t_unit: TranslationUnit,
                  var_name, sweep_inames=None, dim_arg_names=None,
                  default_tag=None,
                  rule_name=None, temporary_name=None,
                  temporary_address_space=None, temporary_scope=None,
                  footprint_subscripts=None, fetch_bounding_box=False,
-                 fetch_outer_inames=None, prefetch_insn_id=None, within=None):
+                 fetch_outer_inames=None, prefetch_insn_id=None,
+                 within: ToMatchConvertible = None
+             ) -> TranslationUnit:
     """Prefetch all accesses to the variable *var_name*, with all accesses
     being swept through *sweep_inames*.
 

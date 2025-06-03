@@ -53,6 +53,8 @@ StridesType: TypeAlias = ShapeType
 InameStr: TypeAlias = str
 InameStrSet: TypeAlias = frozenset[InameStr]
 
+InsnId: TypeAlias = str
+
 
 class auto:  # noqa
     """A generic placeholder object for something that should be automatically

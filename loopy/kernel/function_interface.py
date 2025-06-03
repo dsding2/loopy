@@ -41,13 +41,18 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
+    import islpy as isl
     import pymbolic.primitives as p
     from pymbolic.typing import Expression
 
     from loopy.kernel import LoopKernel
     from loopy.kernel.instruction import CallInstruction
     from loopy.target import TargetBase
-    from loopy.translation_unit import CallablesTable, FunctionIdT
+    from loopy.translation_unit import (
+        CallableId,
+        CallablesInferenceContext,
+        CallablesTable,
+    )
     from loopy.types import LoopyType
     from loopy.typing import ShapeType
 
@@ -181,10 +186,9 @@ class ArrayArgDescriptor(ArgDescriptor):
         return frozenset(var.name for var in result)
 
 
-class ExpressionIsScalarChecker(WalkMapper):
-    def __init__(self, kernel):
-        self.kernel = kernel
-        super().__init__()
+@dataclass
+class ExpressionIsScalarChecker(WalkMapper[[]]):
+    kernel: LoopKernel
 
     def map_sub_array_ref(self, expr):
         raise LoopyError("Sub-array refs can only be used as call's parameters"
@@ -219,7 +223,7 @@ class ExpressionIsScalarChecker(WalkMapper):
         raise NotImplementedError
 
 
-def get_arg_descriptor_for_expression(kernel, expr):
+def get_arg_descriptor_for_expression(kernel: LoopKernel, expr: Expression):
     """
     :returns: a :class:`ArrayArgDescriptor` or a :class:`ValueArgDescriptor`
         describing the argument expression *expr* which occurs
@@ -301,13 +305,13 @@ class AbstractExpressionToCodeMapper(Protocol):
 
 # {{{ helper function for in-kernel callables
 
-def get_kw_pos_association(kernel):
+def get_kw_pos_association(kernel: LoopKernel):
     """
     Returns a tuple of ``(kw_to_pos, pos_to_kw)`` for the arguments in
     *kernel*.
     """
-    kw_to_pos = {}
-    pos_to_kw = {}
+    kw_to_pos: dict[str, int] = {}
+    pos_to_kw: dict[int, str] = {}
 
     read_count = 0
     write_count = -1
@@ -400,7 +404,14 @@ class InKernelCallable(ABC):
     def copy(self, **kwargs: Any) -> Self:
         return replace(self, **kwargs)
 
-    def with_types(self, arg_id_to_dtype, clbl_inf_ctx):
+    @abstractmethod
+    def with_types(self,
+                   # keyword args are *mostly* unimplemented, *however*
+                   # the string keys are used in infer_unknown_types
+                   # for entrypoints, which are keyword-only.
+                   arg_id_to_dtype: Mapping[int | str, LoopyType],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
         """
         :arg arg_id_to_type: a mapping from argument identifiers (integers for
             positional arguments) to :class:`loopy.types.LoopyType` instances.
@@ -425,10 +436,13 @@ class InKernelCallable(ABC):
             other callables within it, then *clbl_inf_ctx* is returned as is.
         """
 
-        raise NotImplementedError()
+        ...
 
     @abstractmethod
-    def with_descrs(self, arg_id_to_descr, clbl_inf_ctx):
+    def with_descrs(self,
+                   arg_id_to_descr: Mapping[int, ArgDescriptor],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
         """
         :arg arg_id_to_descr: a mapping from argument identifiers (integers for
             positional arguments) to instances of
@@ -460,7 +474,11 @@ class InKernelCallable(ABC):
                 self.arg_id_to_descr is not None)
 
     @abstractmethod
-    def get_hw_axes_sizes(self, arg_id_to_arg, space, callables_table):
+    def get_hw_axes_sizes(self,
+                arg_id_to_arg: Mapping[int, Expression],
+                space: isl.Space,
+                callables_table: CallablesTable
+            ) -> tuple[Mapping[int, isl.PwAff], Mapping[int, isl.PwAff]]:
         """
         Returns ``gsizes, lsizes``, where *gsizes* and *lsizes* are mappings
         from axis indices to corresponding group or local hw axis sizes. The hw
@@ -474,7 +492,7 @@ class InKernelCallable(ABC):
         ...
 
     @abstractmethod
-    def get_used_hw_axes(self, callables_table):
+    def get_used_hw_axes(self, callables_table: CallablesTable):
         """
         Returns a tuple ``group_axes_used, local_axes_used``, where
         ``(group|local)_axes_used`` are :class:`frozenset` of hardware axes
@@ -519,7 +537,7 @@ class InKernelCallable(ABC):
                              self,
                              callables_table: CallablesTable,
                              recursive: bool = True
-                         ) -> frozenset[FunctionIdT]:
+                         ) -> frozenset[CallableId]:
         """
         Returns a :class:`frozenset` of callable ids called by *self* that are
         resolved via *callables_table*.
@@ -532,14 +550,14 @@ class InKernelCallable(ABC):
         """
 
     @abstractmethod
-    def with_name(self, name):
+    def with_name(self, name: CallableId) -> Self:
         """
         Returns a copy of *self* so that it could be referred by *name*
         in a :attr:`loopy.TranslationUnit.callables_table`'s namespace.
         """
 
     @abstractmethod
-    def is_type_specialized(self):
+    def is_type_specialized(self) -> bool:
         """
         Returns *True* iff *self*'s type signature is known, else returns
         *False*.
@@ -586,11 +604,19 @@ class ScalarCallable(InKernelCallable):
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "name_in_target", name_in_target)
 
-    def with_types(self, arg_id_to_dtype, callables_table):
+    @override
+    def with_types(self,
+                   arg_id_to_dtype: Mapping[int | str, LoopyType],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
         raise LoopyError("No type inference information present for "
                 "the function %s." % (self.name))
 
-    def with_descrs(self, arg_id_to_descr, clbl_inf_ctx):
+    @override
+    def with_descrs(self,
+                   arg_id_to_descr: Mapping[int, ArgDescriptor],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
         new_arg_id_to_descr = constantdict(arg_id_to_descr).mutate()
         new_arg_id_to_descr[-1] = ValueArgDescriptor()
 
@@ -722,9 +748,11 @@ class ScalarCallable(InKernelCallable):
         """
         return frozenset()
 
-    def with_name(self, name):
+    @override
+    def with_name(self, name: CallableId) -> Self:
         return self
 
+    @override
     def is_type_specialized(self):
         return (self.arg_id_to_dtype is not None
                 and all(dtype is not None
@@ -771,7 +799,11 @@ class CallableKernel(InKernelCallable):
     def name(self) -> str:
         return self.subkernel.name
 
-    def with_types(self, arg_id_to_dtype, callables_table):
+    @override
+    def with_types(self,
+                   arg_id_to_dtype: Mapping[int | str, LoopyType],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
         kw_to_pos, pos_to_kw = get_kw_pos_association(self.subkernel)
 
         new_args = []
@@ -779,6 +811,7 @@ class CallableKernel(InKernelCallable):
             kw = arg.name
             if kw in arg_id_to_dtype:
                 # id exists as kw
+                # FIXME: kwargs are only half-implemented here
                 new_args.append(arg.copy(dtype=arg_id_to_dtype[kw]))
             elif kw_to_pos[kw] in arg_id_to_dtype:
                 # id exists as positional argument
@@ -793,10 +826,10 @@ class CallableKernel(InKernelCallable):
 
         # infer the types of the written variables based on the knowledge
         # of the types of the arguments supplied
-        specialized_kernel, callables_table = (
+        specialized_kernel, clbl_inf_ctx = (
                 infer_unknown_types_for_a_single_kernel(
                     pre_specialized_subkernel,
-                    callables_table))
+                    clbl_inf_ctx))
 
         new_arg_id_to_dtype = {}
         for pos, kw in pos_to_kw.items():
@@ -808,9 +841,13 @@ class CallableKernel(InKernelCallable):
         # Return the kernel call with specialized subkernel and the corresponding
         # new arg_id_to_dtype
         return self.copy(subkernel=specialized_kernel,
-                arg_id_to_dtype=constantdict(new_arg_id_to_dtype)), callables_table
+                arg_id_to_dtype=constantdict(new_arg_id_to_dtype)), clbl_inf_ctx
 
-    def with_descrs(self, arg_id_to_descr, clbl_inf_ctx):
+    @override
+    def with_descrs(self,
+                   arg_id_to_descr: Mapping[int, ArgDescriptor],
+                   clbl_inf_ctx: CallablesInferenceContext,
+               ) -> tuple[Self, CallablesInferenceContext]:
 
         # arg_id_to_descr expressions provided are from the caller's namespace,
         # need to register
@@ -1019,18 +1056,25 @@ class CallableKernel(InKernelCallable):
 
         return var(self.subkernel.name)(*tgt_parameters), False
 
-    def get_called_callables(self, callables_table, recursive=True):
+    @override
+    def get_called_callables(self,
+                callables_table: CallablesTable,
+                recursive: bool = True
+            ):
         from loopy.kernel.tools import get_resolved_callable_ids_called_by_knl
         return get_resolved_callable_ids_called_by_knl(self.subkernel,
                                                        callables_table,
                                                        recursive=recursive)
 
-    def with_name(self, name):
+    @override
+    def with_name(self, name: CallableId) -> Self:
+        assert isinstance(name, str)
         new_knl = self.subkernel.copy(name=name)
         return self.copy(subkernel=new_knl)
 
-    def is_type_specialized(self):
-        from loopy.kernel.data import auto
+    @override
+    def is_type_specialized(self) -> bool:
+        from loopy.typing import auto
         return (self.arg_id_to_dtype is not None
                 and all(arg.dtype not in [None, auto]
                         for arg in self.subkernel.args)

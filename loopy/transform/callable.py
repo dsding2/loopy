@@ -50,7 +50,7 @@ from loopy.symbolic import (
     RuleAwareSubstitutionMapper,
     SubstitutionRuleMappingContext,
 )
-from loopy.translation_unit import FunctionIdT, TranslationUnit, for_each_kernel
+from loopy.translation_unit import CallableId, TranslationUnit, for_each_kernel
 
 
 if TYPE_CHECKING:
@@ -122,7 +122,7 @@ def merge(translation_units: Sequence[TranslationUnit]) -> TranslationUnit:
 
     # }}}
 
-    callables_table: dict[FunctionIdT, InKernelCallable] = {}
+    callables_table: dict[CallableId, InKernelCallable] = {}
     for trans_unit in translation_units:
         callables_table.update(trans_unit.callables_table)
 

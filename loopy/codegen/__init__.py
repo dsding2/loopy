@@ -34,6 +34,9 @@ from typing import (
 
 import constantdict
 
+from loopy.types import NumpyType
+from loopy.typing import not_none
+
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,8 @@ from loopy.version import DATA_MODEL_VERSION
 
 
 if TYPE_CHECKING:
+    from pymbolic import Expression
+
     from loopy.codegen.result import CodeGenerationResult, GeneratedProgram
     from loopy.codegen.tools import CodegenOperationCacheManager
     from loopy.kernel import LoopKernel
@@ -60,7 +65,6 @@ if TYPE_CHECKING:
     from loopy.target import TargetBase
     from loopy.translation_unit import CallablesTable, TranslationUnit
     from loopy.types import LoopyType
-    from loopy.typing import Expression
 
 
 __doc__ = """
@@ -206,7 +210,7 @@ class CodeGenerationState:
         new_impl, new_other = isl.align_two(self.implemented_domain, other)
         return self.copy(implemented_domain=new_impl & new_other)
 
-    def fix(self, iname, aff):
+    def fix(self, iname: str, aff: isl.Aff) -> CodeGenerationState:
         new_impl_domain = self.implemented_domain
 
         impl_space = self.implemented_domain.get_space()
@@ -341,8 +345,12 @@ class PreambleInfo:
 
 # {{{ main code generation entrypoint
 
-def generate_code_for_a_single_kernel(kernel, callables_table, target,
-        is_entrypoint):
+def generate_code_for_a_single_kernel(
+            kernel: LoopKernel,
+            callables_table: CallablesTable,
+            target: TargetBase,
+            is_entrypoint: bool,
+        ) -> CodeGenerationResult:
     """
     :returns: a :class:`CodeGenerationResult`
 
@@ -359,7 +367,8 @@ def generate_code_for_a_single_kernel(kernel, callables_table, target,
     # {{{ examine arg list
 
     allow_complex = False
-    for var in kernel.args + list(kernel.temporary_variables.values()):
+    for var in [*kernel.args, *kernel.temporary_variables.values()]:
+        assert isinstance(var.dtype, NumpyType)
         if var.dtype.involves_complex():
             allow_complex = True
 
@@ -376,7 +385,7 @@ def generate_code_for_a_single_kernel(kernel, callables_table, target,
     codegen_state = CodeGenerationState(
             kernel=kernel,
             target=target,
-            implemented_domain=initial_implemented_domain,
+            implemented_domain=isl.Set.from_basic_set(initial_implemented_domain),
             implemented_predicates=frozenset(),
             seen_dtypes=seen_dtypes,
             seen_functions=seen_functions,
@@ -389,7 +398,7 @@ def generate_code_for_a_single_kernel(kernel, callables_table, target,
                 target.host_program_name_prefix
                 + kernel.name
                 + kernel.target.host_program_name_suffix),
-            schedule_index_end=len(kernel.linearization),
+            schedule_index_end=len(not_none(kernel.linearization)),
             callables_table=callables_table,
             is_entrypoint=is_entrypoint,
             codegen_cache_manager=CodegenOperationCacheManager.from_kernel(kernel),
@@ -418,7 +427,8 @@ def generate_code_for_a_single_kernel(kernel, callables_table, target,
     if kernel.all_inames():
         seen_dtypes.add(kernel.index_dtype)
 
-    preambles = kernel.preambles + codegen_result.device_preambles
+    preambles = [
+        *kernel.preambles, *codegen_result.device_preambles]
 
     preamble_info = PreambleInfo(
             kernel=kernel,
@@ -429,10 +439,10 @@ def generate_code_for_a_single_kernel(kernel, callables_table, target,
             codegen_state=codegen_state
             )
 
-    preamble_generators = (list(kernel.preamble_generators)
-            + list(target.get_device_ast_builder().preamble_generators()))
-    for prea_gen in preamble_generators:
-        preambles = preambles + tuple(prea_gen(preamble_info))
+    for prea_gen in [
+            *kernel.preamble_generators,
+            *target.get_device_ast_builder().preamble_generators()]:
+        preambles.extend(prea_gen(preamble_info))
 
     codegen_result = codegen_result.copy(device_preambles=preambles)
 

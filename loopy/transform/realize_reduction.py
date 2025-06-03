@@ -25,34 +25,45 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 """
-
-
 import logging
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Callable, Sequence
-
-
-logger = logging.getLogger(__name__)
-
-from constantdict import constantdict
+from typing import TYPE_CHECKING, Callable, TypedDict
 
 import islpy as isl
+from pymbolic.primitives import EmptyOK
 from pytools import memoize_on_first_arg
 
 from loopy.diagnostic import LoopyError, ReductionIsNotTriangularError, warn_with_kernel
-from loopy.kernel.data import AddressSpace, TemporaryVariable, make_assignment
+from loopy.kernel.data import AddressSpace, InameImplementationTag, TemporaryVariable
 from loopy.kernel.function_interface import CallableKernel
-from loopy.kernel.instruction import Assignment, InstructionBase, MultiAssignmentBase
-from loopy.symbolic import ReductionCallbackMapper
+from loopy.kernel.instruction import (
+    Assignment,
+    InstructionBase,
+    MultiAssignmentBase,
+    make_assignment,
+)
+from loopy.symbolic import Reduction, ReductionCallbackMapper
 from loopy.transform.instruction import replace_instruction_ids_in_insn
-from loopy.translation_unit import ConcreteCallablesTable, TranslationUnit
+from loopy.translation_unit import (
+    CallablesTable,
+    TranslationUnit,
+)
+from loopy.typing import not_none
 
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Sequence
+
+    from pymbolic import Expression
     from pymbolic.primitives import ExpressionNode
     from pytools.tag import Tag
 
     from loopy.kernel import LoopKernel
+    from loopy.types import LoopyType
+    from loopy.typing import InameStr
+
+
+logger = logging.getLogger(__name__)
 
 
 # {{{ reduction realization context
@@ -60,6 +71,14 @@ if TYPE_CHECKING:
 @dataclass
 class _ChangeFlag:
     changes_made: bool
+
+
+class InsnKwargs(TypedDict):
+    within_inames: frozenset[str]
+    within_inames_is_final: bool
+    depends_on: frozenset[str]
+    no_sync_with: frozenset[tuple[str, str]]
+    predicates: frozenset[Expression]
 
 
 @dataclass(frozen=True)
@@ -70,6 +89,8 @@ class _ReductionRealizationContext:
 
     force_scan: bool
     automagic_scans_ok: bool
+
+    # FIXME: Can we get rid of unknown_types_ok == True?
     unknown_types_ok: bool
 
     # FIXME: This feels like a broken-by-design concept.
@@ -92,9 +113,9 @@ class _ReductionRealizationContext:
     additional_temporary_variables: dict[str, TemporaryVariable]
     additional_insns: list[InstructionBase]
     domains: list[isl.BasicSet]
-    additional_iname_tags: dict[str, Sequence[Tag]]
+    additional_iname_tags: dict[str, Collection[Tag]]
     # list only to facilitate mutation
-    boxed_callables_table: list[ConcreteCallablesTable]
+    boxed_callables_table: list[CallablesTable]
 
     # FIXME: This is a broken-by-design concept. Local-parallel scans emit a
     # reduction internally. This serves to avoid force_scan acting on that
@@ -157,7 +178,7 @@ class _ReductionRealizationContext:
                 surrounding_insn_add_depends_on=set(),
                 surrounding_insn_add_no_sync_with=set())
 
-    def get_insn_kwargs(self):
+    def get_insn_kwargs(self) -> InsnKwargs:
         return {
                 "within_inames": (
                     self.surrounding_within_inames
@@ -1069,7 +1090,7 @@ def map_reduction_seq(red_realize_ctx, expr, nresults, arg_dtypes, reduction_dty
 
 # {{{ reduction type: local-parallel
 
-def _get_int_iname_size(kernel, iname):
+def _get_int_iname_size(kernel: LoopKernel, iname: InameStr) -> int:
     from loopy.isl_helpers import static_max_of_pw_aff
     from loopy.symbolic import pw_aff_to_expr
     size = pw_aff_to_expr(
@@ -1080,7 +1101,7 @@ def _get_int_iname_size(kernel, iname):
     return size
 
 
-def _make_slab_set(iname, size):
+def _make_slab_set(iname: InameStr, size: int | isl.PwAff) -> isl.BasicSet:
     v = isl.make_zero_and_vars([iname])
     bs, = (
             v[0].le_set(v[iname])
@@ -1089,7 +1110,11 @@ def _make_slab_set(iname, size):
     return bs
 
 
-def _make_slab_set_from_range(iname, lbound, ubound):
+def _make_slab_set_from_range(
+            iname: str,
+            lbound: int | isl.PwAff,
+            ubound: int | isl.PwAff
+        ):
     v = isl.make_zero_and_vars([iname])
     bs, = (
             v[iname].ge_set(v[0] + lbound)
@@ -1098,8 +1123,13 @@ def _make_slab_set_from_range(iname, lbound, ubound):
     return bs
 
 
-def map_reduction_local(red_realize_ctx, expr, nresults, arg_dtypes,
-        reduction_dtypes):
+def map_reduction_local(
+            red_realize_ctx: _ReductionRealizationContext,
+            expr: Reduction,
+            nresults: int,
+            arg_dtypes: Sequence[LoopyType | None],
+            reduction_dtypes: Sequence[LoopyType | None],
+        ):
     orig_kernel = red_realize_ctx.orig_kernel
 
     red_iname, = expr.inames
@@ -1158,7 +1188,7 @@ def map_reduction_local(red_realize_ctx, expr, nresults, arg_dtypes,
     init_insn = make_assignment(
             id=init_id,
             assignees=tuple(
-                acc_var[(*outer_local_iname_vars, var(base_exec_iname))]
+                acc_var[EmptyOK((*outer_local_iname_vars, var(base_exec_iname)))]
                 for acc_var in acc_vars),
             expression=neutral,
             within_inames=(
@@ -1244,7 +1274,8 @@ def map_reduction_local(red_realize_ctx, expr, nresults, arg_dtypes,
                 acc_var[(*outer_local_iname_vars, var(red_iname))]
                 for acc_var in acc_vars),
             expression=expression,
-            **transfer_red_realize_ctx.get_insn_kwargs())
+            **transfer_red_realize_ctx.get_insn_kwargs()
+        )
     red_realize_ctx.additional_insns.append(transfer_insn)
 
     cur_size = 1
@@ -1762,7 +1793,12 @@ def map_scan_local(red_realize_ctx, expr, nresults, arg_dtypes,
 
 # {{{ top-level dispatch among reduction types
 
-def map_reduction(expr, *, red_realize_ctx, nresults):
+def map_reduction(
+            expr: Reduction,
+            *,
+            red_realize_ctx: _ReductionRealizationContext,
+            nresults: int
+        ):
     kernel_with_updated_domains = red_realize_ctx.kernel.copy(
             domains=red_realize_ctx.domains)
 
@@ -1877,8 +1913,10 @@ def map_reduction(expr, *, red_realize_ctx, nresults):
                         "Sweep iname '%s' has an unsupported parallel tag '%s' "
                         "- the only parallelism allowed is 'local'." %
                         (sweep_iname,
-                         ", ".join(tag.key
-                        for tag in red_realize_ctx.kernel.iname_tags(sweep_iname))))
+                         ", ".join(str(tag)
+                            for tag in red_realize_ctx.kernel.iname_tags_of_type(
+                                     sweep_iname, InameImplementationTag)
+                        )))
             elif parallel:
                 return map_scan_local(red_realize_ctx, expr, nresults,
                         arg_dtypes, reduction_dtypes, scan_param)
@@ -1916,7 +1954,8 @@ def map_reduction(expr, *, red_realize_ctx, nresults):
 # {{{ realize_reduction_for_single_kernel
 
 # @remove_any_newly_unused_inames
-def realize_reduction_for_single_kernel(kernel, callables_table,
+def realize_reduction_for_single_kernel(
+        kernel: LoopKernel, callables_table: CallablesTable,
         insn_id_filter=None, unknown_types_ok=True, automagic_scans_ok=False,
         force_scan=False, force_outer_iname_for_scan=None):
     logger.debug("%s: realize reduction" % kernel.name)
@@ -1930,8 +1969,8 @@ def realize_reduction_for_single_kernel(kernel, callables_table,
 
     cb_mapper = RealizeReductionCallbackMapper(map_reduction)
 
-    insn_queue = kernel.instructions[:]
-    domains = kernel.domains[:]
+    insn_queue = list(kernel.instructions)
+    domains = list(kernel.domains)
 
     inames_added_for_scan = set()
 
@@ -2038,7 +2077,7 @@ def realize_reduction_for_single_kernel(kernel, callables_table,
 
             if isinstance(insn.expression, Reduction) and nresults > 1:
                 result_assignment_ids = [
-                        insn_id_gen(insn.id) for i in range(nresults)]
+                        insn_id_gen(not_none(insn.id)) for _i in range(nresults)]
                 replacement_insns = [
                         Assignment(
                             id=result_assignment_ids[i],
@@ -2098,7 +2137,7 @@ def realize_reduction_for_single_kernel(kernel, callables_table,
 
             # The reduction expander needs an up-to-date kernel
             # object to find dependencies. Keep kernel up-to-date.
-            new_temporary_variables = kernel.temporary_variables.copy()
+            new_temporary_variables = dict(kernel.temporary_variables)
             new_temporary_variables.update(
                     red_realize_ctx.additional_temporary_variables)
 
@@ -2172,7 +2211,7 @@ def realize_reduction(t_unit, *args, **kwargs):
 
     assert isinstance(t_unit, TranslationUnit)
 
-    callables_table = dict(t_unit.callables_table)
+    callables_table = t_unit.callables_table
     kernels_to_scan = [in_knl_callable.subkernel
             for in_knl_callable in t_unit.callables_table.values()
             if isinstance(in_knl_callable, CallableKernel)]
@@ -2182,8 +2221,8 @@ def realize_reduction(t_unit, *args, **kwargs):
                 knl, callables_table, *args, **kwargs)
         in_knl_callable = callables_table[knl.name].copy(
                 subkernel=new_knl)
-        callables_table[knl.name] = in_knl_callable
+        callables_table.set(knl.name,  in_knl_callable)
 
-    return t_unit.copy(callables_table=constantdict(callables_table))
+    return t_unit.copy(callables_table=callables_table)
 
 # vim: foldmethod=marker

@@ -56,6 +56,7 @@ from loopy.kernel.data import (
 from loopy.symbolic import IdentityMapper, SubArrayRef, WalkMapper
 from loopy.tools import Optional, intern_frozenset_of_ids
 from loopy.translation_unit import TranslationUnit, for_each_kernel
+from loopy.typing import not_none
 
 
 logger = logging.getLogger(__name__)
@@ -2472,7 +2473,7 @@ def make_function(domains, instructions, kernel_data=None, **kwargs):
         for i in range(dom0_space.dim(dim_type.param)):
             assumptions_space = assumptions_space.set_dim_name(
                     dim_type.param, i,
-                    dom0_space.get_dim_name(dim_type.param, i))
+                    not_none(dom0_space.get_dim_name(dim_type.param, i)))
         assumptions = isl.BasicSet.universe(assumptions_space)
     elif isinstance(assumptions, str):
         assumptions_set_str = "[%s] -> { : %s}" \

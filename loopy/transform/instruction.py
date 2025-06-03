@@ -34,6 +34,7 @@ from loopy.translation_unit import TranslationUnit, for_each_kernel
 
 if TYPE_CHECKING:
     from loopy.kernel.instruction import InstructionBase
+    from loopy.match import ToMatchConvertible
 
 
 # {{{ find_instructions
@@ -327,7 +328,7 @@ def replace_instruction_ids(
 # {{{ tag_instructions
 
 @for_each_kernel
-def tag_instructions(kernel, new_tag, within=None):
+def tag_instructions(kernel, new_tag, within: ToMatchConvertible = None):
     from loopy.match import parse_match
     within = parse_match(within)
 

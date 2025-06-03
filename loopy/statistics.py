@@ -29,7 +29,7 @@ THE SOFTWARE.
 """
 
 from functools import cached_property, partial
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import islpy as isl
 from islpy import dim_type
@@ -46,6 +46,8 @@ from loopy.translation_unit import TranslationUnit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from loopy.match import ToMatchConvertible
 
 
 __doc__ = """
@@ -203,7 +205,7 @@ class ToCountMap:
 
         self.count_map = count_map
 
-    def _zero(self):
+    def _zero(self) -> Literal[0] | isl.PwQPolynomial:
         return 0
 
     def __add__(self, other):
@@ -1711,7 +1713,7 @@ def _get_op_map_for_single_kernel(knl, callables_table,
 
 def get_op_map(program, count_redundant_work=False,
                count_within_subscripts=True, subgroup_size=None,
-               entrypoint=None, within=None):
+               entrypoint=None, within: ToMatchConvertible = None):
 
     """Count the number of operations in a loopy kernel.
 
@@ -1912,7 +1914,7 @@ def _get_mem_access_map_for_single_kernel(knl, callables_table,
 
 def get_mem_access_map(program, count_redundant_work=False,
                        subgroup_size=None, entrypoint=None,
-                       within=None):
+                       within: ToMatchConvertible = None):
     """Count the number of memory accesses in a loopy kernel.
 
     :arg knl: A :class:`loopy.LoopKernel` whose memory accesses are to be

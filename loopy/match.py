@@ -29,6 +29,8 @@ Match expressions
 
 from __future__ import annotations
 
+from loopy.typing import not_none
+
 
 __copyright__ = "Copyright (C) 2012 Andreas Kloeckner"
 
@@ -56,25 +58,27 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from sys import intern
-from typing import TYPE_CHECKING, Protocol, Sequence, Union
+from typing import TYPE_CHECKING, Protocol, cast
 
-from typing_extensions import TypeAlias
+from typing_extensions import TypeAlias, override
 
 from loopy.kernel.instruction import InstructionBase
 
 
 NoneType = type(None)
 
-from pytools.lex import RE
+from pytools.lex import RE, LexTable
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import pytools.tag
 
     from loopy.kernel import LoopKernel
 
 
-def re_from_glob(s: str) -> re.Pattern:
+def re_from_glob(s: str) -> re.Pattern[str]:
     from fnmatch import translate
     return re.compile("^"+translate(s.strip())+"$")
 
@@ -101,7 +105,7 @@ _whitespace = intern("_whitespace")
 # }}}
 
 
-_LEX_TABLE = [
+_LEX_TABLE: LexTable = [
     (_and, RE(r"and\b")),
     (_or, RE(r"or\b")),
     (_not, RE(r"not\b")),
@@ -140,6 +144,10 @@ class Matchable(Protocol):
     .. attribute:: tags
     """
     @property
+    def id(self) -> str | None:
+        ...
+
+    @property
     def tags(self) -> frozenset[pytools.tag.Tag]:
         ...
 
@@ -149,13 +157,14 @@ class MatchExpressionBase(ABC):
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         raise NotImplementedError
 
-    def __ne__(self, other):
+    @override
+    def __ne__(self, other: object):
         return not self.__eq__(other)
 
-    def __and__(self, other):
+    def __and__(self, other: MatchExpressionBase):
         return And((self, other))
 
-    def __or__(self, other):
+    def __or__(self, other: MatchExpressionBase):
         return Or((self, other))
 
     def __inv__(self):
@@ -163,33 +172,40 @@ class MatchExpressionBase(ABC):
 
 
 class All(MatchExpressionBase):
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         return True
 
+    @override
     def __str__(self):
         return "all"
 
+    @override
     def __repr__(self):
         return "%s()" % (type(self).__name__)
 
     def update_persistent_hash(self, key_hash, key_builder):
         key_builder.rec(key_hash, "all_match_expr")
 
-    def __eq__(self, other):
+    @override
+    def __eq__(self, other: object) -> bool:
         return type(self) is type(other)
 
+    @override
     def __hash__(self):
         return hash(type(self))
 
 
 @dataclass(frozen=True, eq=True)
-class MultiChildMatchExpressionBase(MatchExpressionBase):
+class MultiChildMatchExpressionBase(MatchExpressionBase, ABC):
     children: Sequence[MatchExpressionBase]
 
+    @override
     def __str__(self):
         joiner = " %s " % type(self).__name__.lower()
         return "(%s)" % (joiner.join(str(ch) for ch in self.children))
 
+    @override
     def __repr__(self):
         return "{}({})".format(
                 type(self).__name__,
@@ -197,11 +213,13 @@ class MultiChildMatchExpressionBase(MatchExpressionBase):
 
 
 class And(MultiChildMatchExpressionBase):
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         return all(ch(kernel, matchable) for ch in self.children)
 
 
 class Or(MultiChildMatchExpressionBase):
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         return any(ch(kernel, matchable) for ch in self.children)
 
@@ -210,12 +228,15 @@ class Or(MultiChildMatchExpressionBase):
 class Not(MatchExpressionBase):
     child: MatchExpressionBase
 
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         return not self.child(kernel, matchable)
 
+    @override
     def __str__(self):
         return "(not %s)" % str(self.child)
 
+    @override
     def __repr__(self):
         return "{}({!r})".format(type(self).__name__, self.child)
 
@@ -231,11 +252,14 @@ class ObjTagged(MatchExpressionBase):
     """
     tag: pytools.tag.Tag
 
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         return self.tag in matchable.tags
 
 
-class GlobMatchExpressionBase(MatchExpressionBase):
+class GlobMatchExpressionBase(MatchExpressionBase, ABC):
+    glob: str
+
     def __init__(self, glob: str) -> None:
         self.glob = glob
 
@@ -243,10 +267,12 @@ class GlobMatchExpressionBase(MatchExpressionBase):
         from fnmatch import translate
         self.re = re.compile("^"+translate(glob.strip())+"$")
 
+    @override
     def __str__(self):
         descr = type(self).__name__
         return descr.lower() + ":" + self.glob
 
+    @override
     def __repr__(self):
         return "{}({!r})".format(type(self).__name__, self. glob)
 
@@ -254,17 +280,20 @@ class GlobMatchExpressionBase(MatchExpressionBase):
         key_builder.rec(key_hash, type(self).__name__)
         key_builder.rec(key_hash, self.glob)
 
-    def __eq__(self, other):
+    @override
+    def __eq__(self, other: object) -> bool:
         return (type(self) is type(other)
-                and self.glob == other.glob)
+                and self.glob == cast("GlobMatchExpressionBase", other).glob)
 
-    def __hash__(self):
+    @override
+    def __hash__(self) -> int:
         return hash((type(self), self.glob))
 
 
 class Id(GlobMatchExpressionBase):
-    def __call__(self, kernel, matchable):
-        return self.re.match(matchable.id)
+    @override
+    def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
+        return bool(self.re.match(not_none(matchable.id)))
 
 
 class Tagged(GlobMatchExpressionBase):
@@ -276,6 +305,7 @@ class Tagged(GlobMatchExpressionBase):
         by instance-based tags matched by :class:`ObjTagged`.
     """
 
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         from loopy.kernel.instruction import LegacyStringInstructionTag
         if matchable.tags:
@@ -292,27 +322,29 @@ class Tagged(GlobMatchExpressionBase):
 
 
 class Writes(GlobMatchExpressionBase):
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         if not isinstance(matchable, InstructionBase):
             return False
-        return any(self.re.match(name)
-                for name in matchable.assignee_var_names())
+        return any(self.re.match(name) for name in matchable.assignee_var_names())
 
 
 class Reads(GlobMatchExpressionBase):
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         if not isinstance(matchable, InstructionBase):
             return False
-        return any(self.re.match(name)
-                for name in matchable.read_dependency_names())
+        return any(self.re.match(name) for name in matchable.read_dependency_names())
 
 
 class InKernel(GlobMatchExpressionBase):
-    def __call__(self, kernel, matchable):
-        return self.re.match(kernel.name)
+    @override
+    def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
+        return bool(self.re.match(kernel.name))
 
 
 class Iname(GlobMatchExpressionBase):
+    @override
     def __call__(self, kernel: LoopKernel, matchable: Matchable) -> bool:
         if not isinstance(matchable, InstructionBase):
             return False
@@ -325,7 +357,10 @@ class Iname(GlobMatchExpressionBase):
 
 # {{{ parser
 
-def parse_match(expr):
+ToMatchConvertible: TypeAlias = str | MatchExpressionBase | None
+
+
+def parse_match(expr: ToMatchConvertible) -> MatchExpressionBase:
     """Syntax examples::
 
     * ``id:yoink and writes:a_temp``
@@ -334,8 +369,9 @@ def parse_match(expr):
     if not expr:
         return All()
 
-    def parse_terminal(pstate):
+    def parse_terminal(pstate: LexIterator) -> MatchExpressionBase:
         next_tag = pstate.next_tag()
+        result: MatchExpressionBase
         if next_tag is _id:
             result = Id(pstate.next_match_obj().group(1))
             pstate.advance()
@@ -363,9 +399,10 @@ def parse_match(expr):
         else:
             pstate.expected("terminal")
 
-    def inner_parse(pstate, min_precedence=0):
+    def inner_parse(pstate: LexIterator, min_precedence: int = 0):
         pstate.expect_not_end()
 
+        left_query: MatchExpressionBase
         if pstate.is_next(_not):
             pstate.advance()
             left_query = Not(inner_parse(pstate, _PREC_NOT))
@@ -538,7 +575,7 @@ class StackMatch:
 
 # {{{ stack match parsing
 
-ToStackMatchConvertible: TypeAlias = Union[StackMatch, str, None]
+ToStackMatchConvertible: TypeAlias = MatchExpressionBase | StackMatch | str | None
 
 
 def parse_stack_match(smatch: ToStackMatchConvertible) -> StackMatch:

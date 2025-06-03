@@ -25,10 +25,12 @@ THE SOFTWARE.
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import reduce
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
+from typing_extensions import override
 
 import islpy as isl
 from islpy import dim_type
@@ -76,6 +78,7 @@ from loopy.typing import not_none
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    import pymbolic.primitives as p
     from pymbolic.typing import Expression
 
     from loopy.kernel import LoopKernel
@@ -707,11 +710,10 @@ def _mark_variables_from_caller(expr):
 # }}}
 
 
-class _AccessCheckMapper(WalkMapper):
-    def __init__(self, kernel, callables_table):
-        self.kernel = kernel
-        self.callables_table = callables_table
-        super().__init__()
+@dataclass
+class _AccessCheckMapper(WalkMapper[[isl.BasicSet, str]]):
+    kernel: LoopKernel
+    callables_table: CallablesTable
 
     @memoize_method
     def _make_slab(self, space, iname, start, stop):
@@ -719,14 +721,20 @@ class _AccessCheckMapper(WalkMapper):
         return make_slab(space, iname, start, stop)
 
     @memoize_method
-    def _get_access_range(self, domain, subscript):
-        from loopy.symbolic import UnableToDetermineAccessRangeError, get_access_map
+    def _get_access_range(
+                self,
+                domain: isl.BasicSet,
+                subscript: tuple[Expression, ...]
+            ):
+        from loopy.diagnostic import UnableToDetermineAccessRangeError
+        from loopy.symbolic import get_access_map
         try:
             return get_access_map(domain, subscript).range()
         except UnableToDetermineAccessRangeError:
             return None
 
-    def map_subscript(self, expr, domain, insn_id):
+    @override
+    def map_subscript(self, expr: p.Subscript, domain: isl.BasicSet, insn_id: str):
         WalkMapper.map_subscript(self, expr, domain, insn_id)
 
         from pymbolic.primitives import Variable
@@ -742,6 +750,7 @@ class _AccessCheckMapper(WalkMapper):
             shape = tv.shape
 
         if shape is not None:
+            assert isinstance(shape, tuple)
             subscript = expr.index
 
             if not isinstance(subscript, tuple):
@@ -787,7 +796,8 @@ class _AccessCheckMapper(WalkMapper):
                         " establish '%s' is a subset of '%s')."
                         % (expr, insn_id, access_range, shape_domain))
 
-    def map_if(self, expr, domain, insn_id):
+    @override
+    def map_if(self, expr: p. If, domain: isl.BasicSet, insn_id: str):
         from loopy.symbolic import condition_to_set
         then_set = condition_to_set(domain.space, expr.condition)
         if then_set is None:
@@ -800,7 +810,8 @@ class _AccessCheckMapper(WalkMapper):
         self.rec(expr.then, domain & then_set, insn_id)
         self.rec(expr.else_, domain & else_set, insn_id)
 
-    def map_call(self, expr, domain, insn_id):
+    @override
+    def map_call(self, expr: p.Call, domain: isl.BasicSet, insn_id: str):
         # perform access checks on the call arguments
         super().map_call(expr, domain, insn_id)
 
@@ -817,7 +828,9 @@ class _AccessCheckMapper(WalkMapper):
             and isinstance(self.callables_table[expr.function.name],
                            CallableKernel)):
 
-            subkernel = self.callables_table[expr.function.name].subkernel
+            subkernel = cast(
+                             "CallableKernel",
+                             self.callables_table[expr.function.name]).subkernel
 
             # The plan here is to add the constraints coming from the values
             # args passed at a call-site as assumptions to the callee. To avoid
@@ -835,8 +848,8 @@ class _AccessCheckMapper(WalkMapper):
 
             kw_space = isl.Space.create_from_names(
                 subkernel.isl_context, set=[],
-                params=(get_dependencies(tuple(kwargs.values()))
-                        | set(kwargs.keys())))
+                params=[*get_dependencies(tuple(kwargs.values())),
+                        *kwargs.keys()])
 
             extra_assumptions = isl.BasicSet.universe(kw_space).params()
 
@@ -894,8 +907,8 @@ def _check_bounds_inner(kernel: LoopKernel, callables_table: CallablesTable) -> 
             domain, assumptions = isl.align_two(domain, kernel.assumptions)
             domain_with_assumptions = domain & assumptions
 
-        def run_acm(expr):
-            acm(expr, domain_with_assumptions, insn.id)  # noqa: B023
+        def run_acm(expr: Expression):
+            acm(expr, domain_with_assumptions, not_none(insn.id))  # noqa: B023
             return expr
 
         insn.with_transformed_expressions(run_acm)
@@ -1875,7 +1888,7 @@ def pre_codegen_checks(t_unit: TranslationUnit) -> None:
 
 def check_implemented_domains(
             kernel: LoopKernel,
-            implemented_domains: Mapping[str, isl.Set],
+            implemented_domains: Mapping[str, Sequence[isl.Set]],
             code: str | None = None,
         ) -> bool:
     from islpy import align_two, dim_type
@@ -1942,7 +1955,7 @@ def check_implemented_domains(
             d_minus_i = desired_domain - insn_impl_domain
 
             parameter_inames = {
-                    insn_domain.get_dim_name(dim_type.param, i)
+                    not_none(insn_domain.get_dim_name(dim_type.param, i))
                     for i in range(insn_impl_domain.dim(dim_type.param))}
 
             lines = []

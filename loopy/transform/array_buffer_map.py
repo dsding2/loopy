@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
-from typing_extensions import Self
+from typing_extensions import Self, override
 
 import islpy as isl
 from islpy import dim_type
@@ -122,6 +122,8 @@ def build_per_access_storage_to_domain_map(
         stor2sweep = stor2sweep.move_dims(
                 dim_type.in_, 0,
                 dim_type.out, rn, stor_dim)
+
+    assert stor2sweep
 
     # stor2sweep is back in map_space
     return stor2sweep
@@ -219,8 +221,11 @@ class ArrayToBufferMapBase(ABC):
         ...
 
     @abstractmethod
-    def augment_domain_with_sweep(self, domain, new_non1_storage_axis_names,
-            boxify_sweep=False):
+    def augment_domain_with_sweep(self,
+                domain: isl.BasicSet,
+                new_non1_storage_axis_names: Sequence[str],
+                boxify_sweep: bool = False
+            ) -> isl.BasicSet:
         ...
 
 
@@ -332,9 +337,12 @@ class ArrayToBufferMap(ArrayToBufferMapBase):
         self.storage_base_indices = storage_base_indices
         self.non1_storage_shape = tuple(non1_storage_shape)
 
-    def augment_domain_with_sweep(self, domain, new_non1_storage_axis_names,
-            boxify_sweep=False):
-
+    @override
+    def augment_domain_with_sweep(self,
+                domain: isl.BasicSet,
+                new_non1_storage_axis_names: Sequence[str],
+                boxify_sweep: bool = False
+            ) -> isl.BasicSet:
         renamed_aug_domain = self.aug_domain
         first_storage_index = (renamed_aug_domain.dim(dim_type.set)
                 - len(self.non1_storage_shape))
@@ -443,8 +451,12 @@ class NoOpArrayToBufferMap(ArrayToBufferMapBase):
 
         return True
 
-    def augment_domain_with_sweep(self, domain, new_non1_storage_axis_names,
-            boxify_sweep=False):
+    @override
+    def augment_domain_with_sweep(self,
+                domain: isl.BasicSet,
+                new_non1_storage_axis_names: Sequence[str],
+                boxify_sweep: bool = False
+            ) -> isl.BasicSet:
         return domain
 # }}}
 

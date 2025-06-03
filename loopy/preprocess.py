@@ -700,7 +700,8 @@ def infer_arg_descr(t_unit: TranslationUnit) -> TranslationUnit:
             else:
                 raise NotImplementedError()
         new_callable, clbl_inf_ctx = t_unit.callables_table[e].with_descrs(
-                arg_id_to_descr, clbl_inf_ctx)
+                # FIXME: Keyword args are at best half-implemented
+                arg_id_to_descr, clbl_inf_ctx)  # pyright: ignore[reportArgumentType]
         clbl_inf_ctx, _new_name = clbl_inf_ctx.with_callable(e, new_callable,
                                                             is_entrypoint=True)
 

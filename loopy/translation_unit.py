@@ -33,6 +33,7 @@ from typing import (
     Callable,
     Mapping,
     TypeVar,
+    cast,
 )
 from warnings import warn
 
@@ -173,9 +174,8 @@ class CallableResolver(RuleAwareIdentityMapper):
 
 # {{{ translation unit
 
-FunctionIdT: TypeAlias = str | ReductionOpFunction
-ConcreteCallablesTable: TypeAlias = constantdict[FunctionIdT, InKernelCallable]
-CallablesTable: TypeAlias = Mapping[FunctionIdT, InKernelCallable]
+CallableId: TypeAlias = str | ReductionOpFunction
+CallablesTable: TypeAlias = constantdict[CallableId, InKernelCallable]
 
 
 @dataclass(frozen=True)
@@ -232,7 +232,7 @@ class TranslationUnit:
 
     """
 
-    callables_table: ConcreteCallablesTable
+    callables_table: CallablesTable
     target: TargetBase
     entrypoints: frozenset[str]
 
@@ -500,7 +500,10 @@ def rename_resolved_functions_in_a_single_kernel(kernel,
 # }}}
 
 
-def get_reachable_resolved_callable_ids(callables, entrypoints):
+def get_reachable_resolved_callable_ids(
+            callables: CallablesTable,
+            entrypoints: abc_Set[CallableId]
+        ) -> frozenset[CallableId]:
     """
     Returns a :class:`frozenset` of callables ids that are resolved and
     reachable from *entrypoints*.
@@ -561,17 +564,20 @@ class CallablesInferenceContext:
 
     .. automethod:: __getitem__
     """
-    callables: Mapping[str, InKernelCallable]
+    callables: CallablesTable
     clbl_name_gen: Callable[[str], str]
-    renames: Mapping[str, frozenset[str]] = field(
+    renames: Mapping[CallableId, frozenset[str]] = field(
             default_factory=lambda: collections.defaultdict(frozenset))
     new_entrypoints: frozenset[str] = frozenset()
 
-    def copy(self, **kwargs: Any) -> CallablesInferenceContext:
+    def copy(self, **kwargs: Any) -> Self:
         return replace(self, **kwargs)
 
-    def with_callable(self, old_function_id, new_clbl,
-                      is_entrypoint=False):
+    def with_callable(self,
+              old_function_id: CallableId | Variable,
+              new_clbl: InKernelCallable,
+              is_entrypoint: bool = False
+          ) -> tuple[Self, Variable | ReductionOpFunction]:
         """
         Updates the callable referred by *function_id*'s in *self*'s namespace
         to *new_clbl*.
@@ -583,7 +589,7 @@ class CallablesInferenceContext:
             :class:`loopy.kernel.function_interface.InKernelCallable`.
 
         :returns: ``(new_self, new_function_id)`` is a copy of *self* with
-            *new_clbl* in its namespace. *new_clbl* would be referred by
+            *new_clbl* in its namespace. *new_clbl* can be referred to by
             *new_function_id* in *new_self*'s namespace.
         """
 
@@ -646,7 +652,7 @@ class CallablesInferenceContext:
                           new_entrypoints=new_entrypoints),
                 Variable(unique_function_id))
 
-    def finish_program(self, program):
+    def finish_program(self, t_unit: TranslationUnit) -> TranslationUnit:
         """
         Returns a copy of *program* with rollback renaming of the callables
         done whenever possible.
@@ -657,7 +663,7 @@ class CallablesInferenceContext:
         """
         # FIXME: Generalize this if an inference happens over a proper subgraph
         # of the callgraph (the following assert should be removed)
-        assert len(self.new_entrypoints) == len(program.entrypoints)
+        assert len(self.new_entrypoints) == len(t_unit.entrypoints)
 
         # {{{ get all the callables reachable from the new entrypoints.
 
@@ -678,11 +684,11 @@ class CallablesInferenceContext:
 
         # If there are any callees having old entrypoint names => mark them for
         # renaming
-        callees_with_old_entrypoint_names = ((program.entrypoints & new_callable_ids)
-                                             - self.new_entrypoints)
+        callees_with_old_entrypoint_names = cast("frozenset[str]",
+            (new_callable_ids & t_unit.entrypoints) - self.new_entrypoints)
 
         todo_renames = {}
-        new_callables = dict(program.callables_table)
+        new_callables = dict(t_unit.callables_table)
 
         for c in callees_with_old_entrypoint_names:
             todo_renames[c] = self.clbl_name_gen(c)
@@ -690,7 +696,7 @@ class CallablesInferenceContext:
         for e in self.new_entrypoints:
             # note renames to "rollback" the renaming of entrypoints
             todo_renames[e] = history[e]
-            assert todo_renames[e] in program.entrypoints
+            assert todo_renames[e] in t_unit.entrypoints
 
         # }}}
 
@@ -719,11 +725,10 @@ class CallablesInferenceContext:
 
         # }}}
 
-        return program.copy(callables_table=constantdict(new_callables))
+        return t_unit.copy(callables_table=constantdict(new_callables))
 
-    def __getitem__(self, name):
-        result = self.callables[name]
-        return result
+    def __getitem__(self, name: str) -> InKernelCallable:
+        return self.callables[name]
 
 # }}}
 
@@ -812,7 +817,11 @@ def for_each_kernel(
     return wraps(transform)(_collective_transform)
 
 
-def add_callable_to_table(callables_table, clbl_id, clbl):
+def add_callable_to_table(
+            callables_table: CallablesTable,
+            clbl_id: CallableId,
+            clbl: InKernelCallable
+        ) -> tuple[CallableId, CallablesTable]:
     """
     Returns a tuple ``new_clbl_id, new_callables_table`` where
     *new_callables_table* is a copy of *callables_table* with *clbl* in its
@@ -840,7 +849,7 @@ def add_callable_to_table(callables_table, clbl_id, clbl):
     new_callables_table = callables_table.copy()
     new_callables_table[new_clbl_id] = clbl.with_name(new_clbl_id)
 
-    return new_clbl_id, new_callables_table
+    return new_clbl_id, constantdict(new_callables_table)
 
 # }}}
 
@@ -867,7 +876,7 @@ def resolve_callables(t_unit: TranslationUnit) -> TranslationUnit:
     # get loopy specific callables
     known_callables.update(get_loopy_callables())
 
-    callables_table: dict[FunctionIdT, InKernelCallable] = {}
+    callables_table: dict[CallableId, InKernelCallable] = {}
 
     # callables: name of the calls seen in the program
     callables = {name for name, clbl in t_unit.callables_table.items()

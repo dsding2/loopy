@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from loopy.typing import not_none
-
 
 __copyright__ = "Copyright (C) 2012 Andreas Kloeckner"
 
@@ -42,7 +40,7 @@ from pytools.persistent_dict import WriteOncePersistentDict
 
 from loopy.diagnostic import LoopyError, ScheduleDebugInputError, warn_with_kernel
 from loopy.tools import LoopyKeyBuilder, caches
-from loopy.typing import InameStr
+from loopy.typing import InameStr, not_none
 from loopy.version import DATA_MODEL_VERSION
 
 
@@ -56,7 +54,7 @@ if TYPE_CHECKING:
         InameStrSet,
         LoopTree,
     )
-    from loopy.translation_unit import CallablesTable, FunctionIdT, TranslationUnit
+    from loopy.translation_unit import CallableId, CallablesTable, TranslationUnit
 
 
 logger = logging.getLogger(__name__)
@@ -2465,7 +2463,7 @@ def linearize(t_unit: TranslationUnit) -> TranslationUnit:
 
     pre_schedule_checks(t_unit)
 
-    new_callables: dict[FunctionIdT, InKernelCallable] = {}
+    new_callables: dict[CallableId, InKernelCallable] = {}
 
     for name, clbl in t_unit.callables_table.items():
         if isinstance(clbl, CallableKernel):

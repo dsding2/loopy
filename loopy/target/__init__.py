@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from loopy.codegen import CodeGenerationState
     from loopy.codegen.result import CodeGenerationResult
     from loopy.target.execution import ExecutorBase
-    from loopy.translation_unit import FunctionIdT, TranslationUnit
+    from loopy.translation_unit import CallableId, TranslationUnit
     from loopy.typing import Expression
 
 
@@ -163,7 +163,7 @@ class TargetBase:
         raise NotImplementedError()
 
     def get_kernel_executor(
-            self, t_unit: TranslationUnit, *args, entrypoint: FunctionIdT,
+            self, t_unit: TranslationUnit, *args, entrypoint: CallableId,
             **kwargs) -> ExecutorBase:
         """
         :returns: an immutable type to be used as the cache key for
